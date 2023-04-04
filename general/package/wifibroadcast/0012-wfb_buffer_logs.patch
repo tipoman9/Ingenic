@@ -1,0 +1,316 @@
+From 582468025147963fcc9405e3c994bcf6636e0376 Mon Sep 17 00:00:00 2001
+From: home <tipoman9@gmail.com>
+Date: Thu, 16 Mar 2023 08:32:53 +0200
+Subject: [PATCH 1/2] buffer and log changes1
+
+---
+ src/rx.cpp | 30 ++++++++++++++++++++++++++----
+ src/rx.hpp | 12 +++++++++++-
+ src/tx.cpp | 52 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ src/tx.hpp |  5 +++++
+ 4 files changed, 90 insertions(+), 9 deletions(-)
+
+diff --git a/src/rx.cpp b/src/rx.cpp
+index 933507b..afb2c12 100644
+--- a/src/rx.cpp
++++ b/src/rx.cpp
+@@ -107,6 +107,12 @@ void Receiver::loop_iter(void)
+         if (pkt == NULL) {
+             break;
+         }
++        
++        
++
++        Aggregator *dAgg = static_cast<Aggregator*>(agg); 
++        //dAgg->count_p_gross_ttl++;
++        agg->count_p_gross_ttl++;
+ 
+         int pktlen = hdr.caplen;
+         // int pkt_rate = 0
+@@ -187,6 +193,18 @@ void Receiver::loop_iter(void)
+         pkt += iterator._max_length;
+         pktlen -= iterator._max_length;
+ 
++        uint16_t seqNo=pkt[FRAME_SEQ_HB];
++        seqNo=(seqNo<<(8-4)) | (pkt[FRAME_SEQ_LB]>>4);//divide by 16
++
++        if (seqNo - dAgg->count_p_last_seq_no>1)
++            dAgg->count_p_missed_seq_no+=(seqNo - dAgg->count_p_last_seq_no)-1; // we can catch breakpoint here    
++
++        if (seqNo < dAgg->count_p_last_seq_no)//reversed order
++            dAgg->count_p_missed_seq_no+=1000; // we can catch breakpoint here    
++
++        dAgg->count_p_last_seq_no=seqNo;
++
++
+         if (pktlen > (int)sizeof(ieee80211_header))
+         {
+             agg->process_packet(pkt + sizeof(ieee80211_header), pktlen - sizeof(ieee80211_header), wlan_idx, antenna, rssi, NULL);
+@@ -402,7 +420,7 @@ void Aggregator::dump_stats(FILE *fp)
+     }
+     antenna_stat.clear();
+ 
+-    fprintf(fp, "%" PRIu64 "\tPKT\t%u:%u:%u:%u:%u:%u\n", ts, count_p_all, count_p_dec_err, count_p_dec_ok, count_p_fec_recovered, count_p_lost, count_p_bad);
++    fprintf(fp, "%" PRIu64 "\tPKT\t%u:%u:%u:%u:%u:%u_=%u: %uKb\n", ts, count_p_all, count_p_dec_err, count_p_dec_ok, count_p_fec_recovered, count_p_lost, count_p_bad, /*this->count_p_gross_ttl ,*/ this->count_p_missed_seq_no, this->Recvd_ttl/1024);
+     fflush(fp);
+ 
+     if(count_p_override)
+@@ -414,7 +432,7 @@ void Aggregator::dump_stats(FILE *fp)
+     {
+         fprintf(stderr, "%u packets lost\n", count_p_lost);
+     }
+-
++    
+     count_p_all = 0;
+     count_p_dec_err = 0;
+     count_p_dec_ok = 0;
+@@ -422,6 +440,9 @@ void Aggregator::dump_stats(FILE *fp)
+     count_p_lost = 0;
+     count_p_bad = 0;
+     count_p_override = 0;
++    this->count_p_missed_seq_no=0;
++    this->count_p_gross_ttl=0;
++    this->Recvd_ttl=0;
+ }
+ 
+ 
+@@ -703,6 +724,7 @@ void Aggregator::send_packet(int ring_idx, int fragment_idx)
+         count_p_bad += 1;
+     }else if(!(flags & WFB_PACKET_FEC_ONLY))
+     {
++        Recvd_ttl+=packet_size;
+         send(sockfd, payload, packet_size, MSG_DONTWAIT);
+     }
+ }
+@@ -921,11 +943,11 @@ int main(int argc, char* const *argv)
+             break;
+         default: /* '?' */
+         show_usage:
+-            fprintf(stderr, "Local receiver: %s [-K rx_key] [-c client_addr] [-u client_port] [-p radio_port] [-l log_interval] [-e epoch] [-i link_id] interface1 [interface2] ...\n", argv[0]);
++            fprintf(stderr, "T_E_S_T Local receiver: %s [-K rx_key] [-c client_addr] [-u client_port] [-p radio_port] [-l log_interval] [-e epoch] [-i link_id] interface1 [interface2] ...\n", argv[0]);
+             fprintf(stderr, "Remote (forwarder): %s -f [-c client_addr] [-u client_port] [-p radio_port] [-i link_id] interface1 [interface2] ...\n", argv[0]);
+             fprintf(stderr, "Remote (aggregator): %s -a server_port [-K rx_key] [-c client_addr] [-u client_port] [-l log_interval] [-p radio_port] [-e epoch] [-i link_id]\n", argv[0]);
+             fprintf(stderr, "Default: K='%s', connect=%s:%d, link_id=0x%06x, radio_port=%u, epoch=%" PRIu64 ", log_interval=%d\n", keypair.c_str(), client_addr.c_str(), client_port, link_id, radio_port, epoch, log_interval);
+-            fprintf(stderr, "WFB-ng version " WFB_VERSION "\n");
++            fprintf(stderr, "WFB-ng version  ");
+             fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
+             exit(1);
+         }
+diff --git a/src/rx.hpp b/src/rx.hpp
+index c62cdbc..ba181d4 100644
+--- a/src/rx.hpp
++++ b/src/rx.hpp
+@@ -39,8 +39,14 @@ typedef enum {
+ class BaseAggregator
+ {
+ public:
++    uint32_t count_p_gross_ttl;
++    uint32_t Recvd_ttl;
++    uint16_t count_p_last_seq_no;
++    uint16_t count_p_missed_seq_no;
++
+     virtual void process_packet(const uint8_t *buf, size_t size, uint8_t wlan_idx, const uint8_t *antenna, const int8_t *rssi, sockaddr_in *sockaddr) = 0;
+     virtual void dump_stats(FILE *fp) = 0;
++
+ protected:
+     int open_udp_socket_for_tx(const std::string &client_addr, int client_port)
+     {
+@@ -64,7 +70,7 @@ protected:
+ 
+ class Forwarder : public BaseAggregator
+ {
+-public:
++public:    
+     Forwarder(const std::string &client_addr, int client_port);
+     ~Forwarder();
+     virtual void process_packet(const uint8_t *buf, size_t size, uint8_t wlan_idx, const uint8_t *antenna, const int8_t *rssi, sockaddr_in *sockaddr);
+@@ -118,10 +124,13 @@ typedef std::unordered_map<uint64_t, antennaItem> antenna_stat_t;
+ class Aggregator : public BaseAggregator
+ {
+ public:
++    
+     Aggregator(const std::string &client_addr, int client_port, const std::string &keypair, uint64_t epoch, uint32_t channel_id);
+     ~Aggregator();
+     virtual void process_packet(const uint8_t *buf, size_t size, uint8_t wlan_idx, const uint8_t *antenna, const int8_t *rssi, sockaddr_in *sockaddr);
+     virtual void dump_stats(FILE *fp);
++    
++
+ private:
+     void init_fec(int k, int n);
+     void deinit_fec(void);
+@@ -148,6 +157,7 @@ private:
+     uint8_t session_key[crypto_aead_chacha20poly1305_KEYBYTES];
+ 
+     antenna_stat_t antenna_stat;
++   
+     uint32_t count_p_all;
+     uint32_t count_p_dec_err;
+     uint32_t count_p_dec_ok;
+diff --git a/src/tx.cpp b/src/tx.cpp
+index c9dc5f7..8868cab 100644
+--- a/src/tx.cpp
++++ b/src/tx.cpp
+@@ -211,6 +211,9 @@ void Transmitter::send_block_fragment(size_t packet_size)
+     {
+         throw runtime_error("Unable to encrypt packet!");
+     }
++    
++    ttl_pckts++;
++    ttl_bytes+=sizeof(wblock_hdr_t) + ciphertext_len;
+ 
+     inject_packet(ciphertext, sizeof(wblock_hdr_t) + ciphertext_len);
+ }
+@@ -283,6 +286,9 @@ void data_source(shared_ptr<Transmitter> &t, vector<int> &rx_fd, int poll_timeou
+     }
+ 
+     uint64_t session_key_announce_ts = 0;
++    uint32_t bytes_ttl=0;
++    uint32_t pckts_ttl=0;
++    uint32_t free_slots=-1;
+ 
+     for(;;)
+     {
+@@ -313,16 +319,35 @@ void data_source(shared_ptr<Transmitter> &t, vector<int> &rx_fd, int poll_timeou
+                 ssize_t rsize;
+                 int fd = rx_fd[i];
+ 
+-                t->select_output(i);
++                t->select_output(i);                
++                free_slots++;
++                //fprintf(stderr, "Start read: \n");                
++
+                 while((rsize = recv(fd, buf, sizeof(buf), 0)) >= 0)
+                 {
++                    bytes_ttl+=rsize;
++                    pckts_ttl++;
+                     uint64_t cur_ts = get_time_ms();
++
+                     if (cur_ts >= session_key_announce_ts)
+                     {
++
++                        //poll for waiting data
++                        uint32_t bytes_available = 1;// recv(fd, buf, 1024*1024, MSG_PEEK);
++                        ioctl(fd, FIONREAD, &bytes_available);
++                        //if (bytes_available>1500)//tisho
++                        fprintf(stderr, "Sent:%d / %d KB/s. Packets:%d/%d free slots:%d Waiting:%d \n", bytes_ttl/1024, t->ttl_bytes/1024, pckts_ttl,t->ttl_pckts, free_slots, bytes_available);
++                        bytes_ttl=0;
++                        pckts_ttl=0;
++                        free_slots=0;
++                        t->ttl_pckts=0;
++                        t->ttl_bytes=0;
++
+                         // Announce session key
+                         t->send_session_key();
+                         session_key_announce_ts = cur_ts + SESSION_KEY_ANNOUNCE_MSEC;
+                     }
++
+                     t->send_packet(buf, rsize, 0);
+                 }
+                 if(errno != EWOULDBLOCK) throw runtime_error(string_format("Error receiving packet: %s", strerror(errno)));
+@@ -347,10 +372,11 @@ int main(int argc, char * const *argv)
+     int mcs_index = 1;
+     int debug_port = 0;
+     int poll_timeout = 0;
++    int recv_buff_sizeKb = 0; 
+ 
+     string keypair = "tx.key";
+ 
+-    while ((opt = getopt(argc, argv, "K:k:n:u:r:p:B:G:S:L:M:D:T:i:e:")) != -1) {
++    while ((opt = getopt(argc, argv, "K:k:n:u:r:p:B:G:S:L:M:D:T:i:e:F:")) != -1) {
+         switch (opt) {
+         case 'K':
+             keypair = optarg;
+@@ -388,6 +414,11 @@ int main(int argc, char * const *argv)
+         case 'T':
+             poll_timeout = atoi(optarg);
+             break;
++
++        case 'F':
++            recv_buff_sizeKb = atoi(optarg);
++            break;
++
+         case 'i':
+             link_id = ((uint32_t)atoi(optarg)) & 0xffffff;
+             break;
+@@ -401,7 +432,7 @@ int main(int argc, char * const *argv)
+             fprintf(stderr, "Default: K='%s', k=%d, n=%d, udp_port=%d, link_id=0x%06x, radio_port=%u, epoch=%" PRIu64 ", bandwidth=%d guard_interval=%s stbc=%d ldpc=%d mcs_index=%d, poll_timeout=%d\n",
+                     keypair.c_str(), k, n, udp_port, link_id, radio_port, epoch, bandwidth, short_gi ? "short" : "long", stbc, ldpc, mcs_index, poll_timeout);
+             fprintf(stderr, "Radio MTU: %lu\n", (unsigned long)MAX_PAYLOAD_SIZE);
+-            fprintf(stderr, "WFB-ng version " WFB_VERSION "\n");
++            fprintf(stderr, "WFB-ng version ");
+             fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
+             exit(1);
+         }
+@@ -485,7 +516,20 @@ int main(int argc, char * const *argv)
+         for(int i = 0; optind + i < argc; i++)
+         {
+             int fd = open_udp_socket_for_rx(udp_port + i);
+-            fprintf(stderr, "Listen on %d for %s\n", udp_port + i, argv[optind + i]);
++
++            int buffer_size=recv_buff_sizeKb * 1024;
++            socklen_t optlen = sizeof(buffer_size);
++
++            if (recv_buff_sizeKb>0){            
++                setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, optlen);
++                fprintf(stderr,"Recv buffer set to %d bytes.\n",buffer_size);
++            }
++
++            buffer_size=0;            
++            getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, &optlen);
++            //printf("Socket receive buffer size: %d\n", buffer_size);
++
++            fprintf(stderr, "Listen on %d for %s buf size:%d bytes \n", udp_port + i, argv[optind + i],buffer_size);
+             rx_fd.push_back(fd);
+             wlans.push_back(string(argv[optind + i]));
+         }
+diff --git a/src/tx.hpp b/src/tx.hpp
+index b12571c..ae49d0b 100644
+--- a/src/tx.hpp
++++ b/src/tx.hpp
+@@ -37,6 +37,11 @@ public:
+     void send_packet(const uint8_t *buf, size_t size, uint8_t flags);
+     void send_session_key(void);
+     virtual void select_output(int idx) = 0;
++
++    uint32_t ttl_pckts;
++    uint32_t ttl_bytes;
++
++
+ protected:
+     virtual void inject_packet(const uint8_t *buf, size_t size) = 0;
+ 
+-- 
+2.34.1
+
+
+From 816ddf80e76339cb4f862cf243197b3a45cc9280 Mon Sep 17 00:00:00 2001
+From: home <tipoman9@gmail.com>
+Date: Thu, 16 Mar 2023 08:50:42 +0200
+Subject: [PATCH 2/2] buffer and log changes.
+
+---
+ src/tx.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/tx.cpp b/src/tx.cpp
+index 8868cab..f90926a 100644
+--- a/src/tx.cpp
++++ b/src/tx.cpp
+@@ -427,12 +427,12 @@ int main(int argc, char * const *argv)
+             break;
+         default: /* '?' */
+         show_usage:
+-            fprintf(stderr, "Usage: %s [-K tx_key] [-k RS_K] [-n RS_N] [-u udp_port] [-p radio_port] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-T poll_timeout] [-e epoch] [-i link_id] interface1 [interface2] ...\n",
++            fprintf(stderr, "Usage: %s [-K tx_key] [-k RS_K] [-n RS_N] [-u udp_port] [-p radio_port] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-T poll_timeout] [-e epoch] [-i link_id] [-F RxBuffKb] interface1 [interface2] ...\n",
+                     argv[0]);
+             fprintf(stderr, "Default: K='%s', k=%d, n=%d, udp_port=%d, link_id=0x%06x, radio_port=%u, epoch=%" PRIu64 ", bandwidth=%d guard_interval=%s stbc=%d ldpc=%d mcs_index=%d, poll_timeout=%d\n",
+                     keypair.c_str(), k, n, udp_port, link_id, radio_port, epoch, bandwidth, short_gi ? "short" : "long", stbc, ldpc, mcs_index, poll_timeout);
+             fprintf(stderr, "Radio MTU: %lu\n", (unsigned long)MAX_PAYLOAD_SIZE);
+-            fprintf(stderr, "WFB-ng version ");
++            fprintf(stderr, "WFB-ng version " WFB_VERSION "\n");
+             fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
+             exit(1);
+         }
+-- 
+2.34.1
+

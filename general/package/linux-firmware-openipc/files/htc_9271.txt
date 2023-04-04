@@ -1,0 +1,1 @@
+This is a patched firmware for Ar9271 to use always MCS3. !
